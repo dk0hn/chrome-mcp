@@ -50,6 +50,16 @@ export class SessionManager {
   }
 
   /**
+   * Clear all cached sessions and state. Called on reconnection.
+   */
+  reset(): void {
+    this.sessions.clear();
+    this.consoleMessages.clear();
+    this.networkRequests.clear();
+    this.selectedTabId = null;
+  }
+
+  /**
    * Enable target discovery so we get events about tab creation/destruction.
    */
   async init(): Promise<void> {

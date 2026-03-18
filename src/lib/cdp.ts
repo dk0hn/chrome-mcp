@@ -1,7 +1,11 @@
 /**
  * Low-level Chrome DevTools Protocol client over WebSocket.
  * Uses Node.js 22+ built-in WebSocket — zero dependencies.
+ * Supports auto-reconnection when Chrome restarts.
  */
+
+import { findChromeConnection } from "./connection.js";
+import { log } from "./logger.js";
 
 export type CDPEventHandler = (params: Record<string, unknown>) => void;
 
@@ -17,17 +21,31 @@ export class CDPClient {
   >();
   private eventHandlers = new Map<string, Set<CDPEventHandler>>();
   private _connected = false;
+  private _reconnecting = false;
+  private _autoReconnect = false;
+  private _onReconnect: (() => Promise<void>) | null = null;
 
   get connected(): boolean {
     return this._connected;
   }
 
-  async connect(wsUrl: string): Promise<void> {
+  /** Set a callback that runs after successful reconnection (re-init sessions, etc.) */
+  set onReconnect(handler: () => Promise<void>) {
+    this._onReconnect = handler;
+  }
+
+  async connect(wsUrl: string, autoReconnect = false): Promise<void> {
+    this._autoReconnect = autoReconnect;
+    return this._connect(wsUrl);
+  }
+
+  private _connect(wsUrl: string): Promise<void> {
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(wsUrl);
 
       this.ws.onopen = () => {
         this._connected = true;
+        this._reconnecting = false;
         resolve();
       };
 
@@ -40,12 +58,17 @@ export class CDPClient {
       };
 
       this.ws.onclose = () => {
+        const wasConnected = this._connected;
         this._connected = false;
         // Reject all pending commands
         for (const [, pending] of this.pending) {
           pending.reject(new Error("WebSocket closed"));
         }
         this.pending.clear();
+
+        if (wasConnected && this._autoReconnect && !this._reconnecting) {
+          this._scheduleReconnect();
+        }
       };
 
       this.ws.onmessage = (event) => {
@@ -56,6 +79,61 @@ export class CDPClient {
         );
       };
     });
+  }
+
+  private _scheduleReconnect(): void {
+    this._reconnecting = true;
+    log("Chrome disconnected. Attempting to reconnect...");
+
+    const attempt = async (delay: number, retries: number) => {
+      if (!this._autoReconnect || this._connected) return;
+
+      await new Promise((r) => setTimeout(r, delay));
+
+      try {
+        const connection = await findChromeConnection();
+        log(`Found Chrome at ${connection.wsUrl}`);
+        await this._connect(connection.wsUrl);
+        log("Reconnected to Chrome");
+
+        if (this._onReconnect) {
+          await this._onReconnect();
+          log("Session manager re-initialized");
+        }
+      } catch {
+        if (retries > 0) {
+          const nextDelay = Math.min(delay * 1.5, 10000);
+          log(
+            `Reconnect failed, retrying in ${Math.round(nextDelay / 1000)}s (${retries} attempts left)`
+          );
+          attempt(nextDelay, retries - 1);
+        } else {
+          log(
+            "Could not reconnect after multiple attempts. Tools will retry on next call."
+          );
+          this._reconnecting = false;
+        }
+      }
+    };
+
+    attempt(1000, 30);
+  }
+
+  /**
+   * Ensure we're connected, attempting reconnection if needed.
+   * Called before every send() to make tool calls self-healing.
+   */
+  async ensureConnected(): Promise<void> {
+    if (this._connected) return;
+
+    log("Not connected, attempting to connect...");
+    const connection = await findChromeConnection();
+    await this._connect(connection.wsUrl);
+    log(`Connected to Chrome at ${connection.wsUrl}`);
+
+    if (this._onReconnect) {
+      await this._onReconnect();
+    }
   }
 
   private handleMessage(data: string): void {
@@ -106,15 +184,14 @@ export class CDPClient {
 
   /**
    * Send a CDP command and wait for its response.
+   * Auto-reconnects if disconnected.
    */
   async send<T = unknown>(
     method: string,
     params?: Record<string, unknown>,
     sessionId?: string
   ): Promise<T> {
-    if (!this.ws || !this._connected) {
-      throw new Error("Not connected to Chrome");
-    }
+    await this.ensureConnected();
 
     const id = this.nextId++;
     const message: Record<string, unknown> = { id, method };
@@ -122,11 +199,6 @@ export class CDPClient {
     if (sessionId) message.sessionId = sessionId;
 
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, {
-        resolve: resolve as (value: unknown) => void,
-        reject,
-      });
-
       const timeout = setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
@@ -178,6 +250,7 @@ export class CDPClient {
   }
 
   disconnect(): void {
+    this._autoReconnect = false;
     if (this.ws) {
       this._connected = false;
       this.ws.close();

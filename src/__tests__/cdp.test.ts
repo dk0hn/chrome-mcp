@@ -1,5 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+vi.mock("../lib/connection.js", () => ({
+  findChromeConnection: vi.fn().mockRejectedValue(new Error("no chrome in test")),
+}));
+
+vi.mock("../lib/logger.js", () => ({
+  log: vi.fn(),
+  logError: vi.fn(),
+}));
+
 import { CDPClient } from "../lib/cdp.js";
+
+// Let ensureConnected() resolve before checking side effects
+const tick = () => new Promise((r) => setTimeout(r, 0));
 
 // Mock WebSocket
 class MockWebSocket {
@@ -17,7 +30,6 @@ class MockWebSocket {
     this.onclose?.();
   }
 
-  // Test helpers
   simulateOpen() {
     this.onopen?.();
   }
@@ -35,7 +47,6 @@ describe("CDPClient", () => {
     client = new CDPClient();
     mockWs = new MockWebSocket();
 
-    // Replace global WebSocket
     vi.stubGlobal("WebSocket", function () {
       return mockWs;
     });
@@ -54,8 +65,8 @@ describe("CDPClient", () => {
     await connectPromise;
 
     const sendPromise = client.send("Browser.getVersion");
+    await tick();
 
-    // Simulate response
     const sentMsg = JSON.parse(mockWs.sent[0]);
     expect(sentMsg.method).toBe("Browser.getVersion");
 
@@ -74,6 +85,7 @@ describe("CDPClient", () => {
     await connectPromise;
 
     const sendPromise = client.send("Invalid.Method");
+    await tick();
 
     const sentMsg = JSON.parse(mockWs.sent[0]);
     mockWs.simulateMessage({
@@ -120,6 +132,7 @@ describe("CDPClient", () => {
     await connectPromise;
 
     client.send("Page.navigate", { url: "https://example.com" }, "session-123");
+    await tick();
 
     const sentMsg = JSON.parse(mockWs.sent[0]);
     expect(sentMsg.sessionId).toBe("session-123");
@@ -132,6 +145,7 @@ describe("CDPClient", () => {
     await connectPromise;
 
     const sendPromise = client.send("Page.navigate", { url: "https://example.com" });
+    await tick();
     mockWs.close();
 
     await expect(sendPromise).rejects.toThrow("WebSocket closed");

@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CDPClient } from "./lib/cdp.js";
 import { SessionManager } from "./lib/session.js";
-import { findDevToolsActivePort } from "./lib/connection.js";
+import { findChromeConnection } from "./lib/connection.js";
 import { registerTabTools } from "./tools/tabs.js";
 import { registerNavigationTools } from "./tools/navigation.js";
 import { registerInspectTools } from "./tools/inspect.js";
@@ -13,6 +13,7 @@ import { registerEmulationTools } from "./tools/emulation.js";
 import { registerPerformanceTools } from "./tools/performance.js";
 import { registerServiceWorkerTools } from "./tools/serviceworker.js";
 import { registerAdvancedTools } from "./tools/advanced.js";
+import { log, logError } from "./lib/logger.js";
 
 export async function createServer(): Promise<McpServer> {
   const server = new McpServer({
@@ -21,17 +22,24 @@ export async function createServer(): Promise<McpServer> {
   });
 
   // Connect to Chrome
-  const connection = findDevToolsActivePort();
-  console.error(`[chrome-mcp] Connecting to Chrome at ${connection.wsUrl}`);
+  const connection = await findChromeConnection();
+  log(`Connecting to Chrome at ${connection.wsUrl}`);
 
   const cdp = new CDPClient();
-  await cdp.connect(connection.wsUrl);
-  console.error("[chrome-mcp] Connected to Chrome");
+  await cdp.connect(connection.wsUrl, true);
+  log("Connected to Chrome");
 
   // Set up session manager
   const sessions = new SessionManager(cdp);
   await sessions.init();
-  console.error("[chrome-mcp] Session manager initialized");
+  log("Session manager initialized");
+
+  // Wire up reconnection: re-init sessions when Chrome reconnects
+  cdp.onReconnect = async () => {
+    sessions.reset();
+    await sessions.init();
+    log("Reconnected and session manager re-initialized");
+  };
 
   // Register all tools
   registerTabTools(server, sessions, cdp);
@@ -46,18 +54,28 @@ export async function createServer(): Promise<McpServer> {
   registerServiceWorkerTools(server, sessions, cdp);
   registerAdvancedTools(server, sessions, cdp);
 
-  console.error("[chrome-mcp] All tools registered");
+  log("All tools registered");
 
   // Handle cleanup
   process.on("SIGINT", () => {
-    console.error("[chrome-mcp] Shutting down...");
+    log("Shutting down (SIGINT)");
     cdp.disconnect();
     process.exit(0);
   });
 
   process.on("SIGTERM", () => {
+    log("Shutting down (SIGTERM)");
     cdp.disconnect();
     process.exit(0);
+  });
+
+  // Catch unhandled errors
+  process.on("uncaughtException", (err) => {
+    logError("Uncaught exception", err);
+  });
+
+  process.on("unhandledRejection", (err) => {
+    logError("Unhandled rejection", err);
   });
 
   return server;
