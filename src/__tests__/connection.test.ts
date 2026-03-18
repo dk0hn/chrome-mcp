@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
-  findDevToolsActivePort,
+  readDevToolsActivePort,
   findChromeConnection,
   probeDebugPort,
 } from "../lib/connection.js";
@@ -10,7 +10,7 @@ import * as os from "node:os";
 vi.mock("node:fs");
 vi.mock("node:os");
 
-describe("findDevToolsActivePort", () => {
+describe("readDevToolsActivePort", () => {
   beforeEach(() => {
     vi.mocked(os.platform).mockReturnValue("darwin");
     vi.mocked(os.homedir).mockReturnValue("/Users/testuser");
@@ -29,7 +29,7 @@ describe("findDevToolsActivePort", () => {
       "9222\n/devtools/browser/abc-123\n"
     );
 
-    const result = findDevToolsActivePort();
+    const result = readDevToolsActivePort();
     expect(result).toEqual({
       wsUrl: "ws://127.0.0.1:9222/devtools/browser/abc-123",
       port: 9222,
@@ -38,7 +38,7 @@ describe("findDevToolsActivePort", () => {
 
   it("should return null when no DevToolsActivePort file found", () => {
     vi.mocked(fs.existsSync).mockReturnValue(false);
-    expect(findDevToolsActivePort()).toBeNull();
+    expect(readDevToolsActivePort()).toBeNull();
   });
 
   it("should try multiple browser directories", () => {
@@ -52,7 +52,7 @@ describe("findDevToolsActivePort", () => {
       "9333\n/devtools/browser/edge-456\n"
     );
 
-    const result = findDevToolsActivePort();
+    const result = readDevToolsActivePort();
     expect(result?.port).toBe(9333);
     expect(existsCalls.some((p) => p.includes("Google/Chrome"))).toBe(true);
   });
@@ -60,7 +60,7 @@ describe("findDevToolsActivePort", () => {
   it("should return null for malformed DevToolsActivePort file", () => {
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(fs.readFileSync).mockReturnValue("garbage\n");
-    expect(findDevToolsActivePort()).toBeNull();
+    expect(readDevToolsActivePort()).toBeNull();
   });
 });
 
@@ -132,10 +132,22 @@ describe("findChromeConnection", () => {
     expect(result.wsUrl).toContain("direct");
   });
 
-  it("should fall back to DevToolsActivePort when port probe fails", async () => {
+  it("should fall back to DevToolsActivePort when default port probe fails", async () => {
+    // Default port 9222 fails, but port from file (9333) succeeds
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockRejectedValue(new Error("ECONNREFUSED"))
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes("9333")) {
+          return Promise.resolve({
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                webSocketDebuggerUrl: "ws://127.0.0.1:9333/devtools/browser/fallback",
+              }),
+          });
+        }
+        return Promise.reject(new Error("ECONNREFUSED"));
+      })
     );
 
     vi.mocked(fs.existsSync).mockImplementation((path) => {

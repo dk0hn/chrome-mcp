@@ -62,8 +62,11 @@ export async function probeDebugPort(
  * Read Chrome's DevToolsActivePort file to get the debugging WebSocket URL.
  * Chrome writes this file when remote debugging is enabled.
  * Format: line 1 = port, line 2 = WebSocket path
+ *
+ * Note: This file can be stale (left over from a previous session).
+ * Callers should verify the connection is live via probeDebugPort().
  */
-export function findDevToolsActivePort(): ChromeConnection | null {
+export function readDevToolsActivePort(): ChromeConnection | null {
   const os = platform();
   const dirs = getProfileDirs()[os];
   if (!dirs) return null;
@@ -93,26 +96,34 @@ export function findDevToolsActivePort(): ChromeConnection | null {
   return null;
 }
 
+/** @deprecated Use readDevToolsActivePort instead */
+export const findDevToolsActivePort = readDevToolsActivePort;
+
 /**
  * Find a Chrome connection. Tries in order:
- * 1. Direct port probe (--remote-debugging-port, no dialog)
- * 2. DevToolsActivePort file (chrome://inspect toggle, may show dialog)
+ * 1. Direct port probe on configured/default port
+ * 2. DevToolsActivePort file — read port, then verify it's live via probe
+ * 3. DevToolsActivePort WebSocket URL as last resort (file may be stale)
  */
 export async function findChromeConnection(): Promise<ChromeConnection> {
-  // Try direct port first — launched with --remote-debugging-port, no approval dialog
+  // Try direct port probe first
   const portEnv = process.env.CHROME_DEBUG_PORT;
   const port = portEnv ? parseInt(portEnv, 10) : DEFAULT_DEBUG_PORT;
   const direct = await probeDebugPort(port);
   if (direct) return direct;
 
-  // Fall back to DevToolsActivePort file
-  const fromFile = findDevToolsActivePort();
-  if (fromFile) return fromFile;
+  // Read DevToolsActivePort and verify the port is actually live
+  const fromFile = readDevToolsActivePort();
+  if (fromFile) {
+    const verified = await probeDebugPort(fromFile.port);
+    if (verified) return verified;
+    // Port from file exists but isn't responding — file is stale
+  }
 
   throw new Error(
-    "Could not connect to Chrome. Either:\n" +
-      "  1. Launch Chrome with: --remote-debugging-port=9222\n" +
-      "  2. Enable remote debugging at chrome://inspect/#remote-debugging\n" +
+    "Could not connect to Chrome. Enable remote debugging:\n" +
+      "  1. Open chrome://inspect/#remote-debugging\n" +
+      "  2. Toggle remote debugging ON\n" +
       "Make sure Chrome is running."
   );
 }
