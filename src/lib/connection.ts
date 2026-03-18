@@ -37,8 +37,9 @@ export interface ChromeConnection {
 }
 
 /**
- * Try connecting to Chrome's /json/version endpoint on a given port.
- * Returns the browser WebSocket URL if Chrome is listening there.
+ * Try connecting to Chrome's /json/version HTTP endpoint.
+ * Works with --remote-debugging-port flag (older approach).
+ * Chrome 146's toggle-based debugging returns 404 here.
  */
 export async function probeDebugPort(
   port: number
@@ -59,12 +60,38 @@ export async function probeDebugPort(
 }
 
 /**
+ * Verify a WebSocket URL is live by opening and immediately closing a connection.
+ * Resolves true if the handshake succeeds, false otherwise.
+ */
+export function verifyWebSocket(wsUrl: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      const ws = new WebSocket(wsUrl);
+      const timeout = setTimeout(() => {
+        ws.close();
+        resolve(false);
+      }, 3000);
+
+      ws.onopen = () => {
+        clearTimeout(timeout);
+        ws.close();
+        resolve(true);
+      };
+
+      ws.onerror = () => {
+        clearTimeout(timeout);
+        resolve(false);
+      };
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/**
  * Read Chrome's DevToolsActivePort file to get the debugging WebSocket URL.
  * Chrome writes this file when remote debugging is enabled.
  * Format: line 1 = port, line 2 = WebSocket path
- *
- * Note: This file can be stale (left over from a previous session).
- * Callers should verify the connection is live via probeDebugPort().
  */
 export function readDevToolsActivePort(): ChromeConnection | null {
   const os = platform();
@@ -101,23 +128,21 @@ export const findDevToolsActivePort = readDevToolsActivePort;
 
 /**
  * Find a Chrome connection. Tries in order:
- * 1. Direct port probe on configured/default port
- * 2. DevToolsActivePort file — read port, then verify it's live via probe
- * 3. DevToolsActivePort WebSocket URL as last resort (file may be stale)
+ * 1. HTTP probe on default/configured port (--remote-debugging-port)
+ * 2. DevToolsActivePort file + WebSocket verification (chrome://inspect toggle)
  */
 export async function findChromeConnection(): Promise<ChromeConnection> {
-  // Try direct port probe first
+  // Try HTTP probe first (works with --remote-debugging-port flag)
   const portEnv = process.env.CHROME_DEBUG_PORT;
   const port = portEnv ? parseInt(portEnv, 10) : DEFAULT_DEBUG_PORT;
   const direct = await probeDebugPort(port);
   if (direct) return direct;
 
-  // Read DevToolsActivePort and verify the port is actually live
+  // Read DevToolsActivePort and verify via WebSocket handshake
   const fromFile = readDevToolsActivePort();
   if (fromFile) {
-    const verified = await probeDebugPort(fromFile.port);
-    if (verified) return verified;
-    // Port from file exists but isn't responding — file is stale
+    const isLive = await verifyWebSocket(fromFile.wsUrl);
+    if (isLive) return fromFile;
   }
 
   throw new Error(

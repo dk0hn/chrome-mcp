@@ -133,22 +133,22 @@ describe("findChromeConnection", () => {
   });
 
   it("should fall back to DevToolsActivePort when default port probe fails", async () => {
-    // Default port 9222 fails, but port from file (9333) succeeds
+    // HTTP probe fails for all ports
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((url: string) => {
-        if (url.includes("9333")) {
-          return Promise.resolve({
-            ok: true,
-            json: () =>
-              Promise.resolve({
-                webSocketDebuggerUrl: "ws://127.0.0.1:9333/devtools/browser/fallback",
-              }),
-          });
-        }
-        return Promise.reject(new Error("ECONNREFUSED"));
-      })
+      vi.fn().mockRejectedValue(new Error("ECONNREFUSED"))
     );
+
+    // Mock WebSocket to succeed (verifyWebSocket handshake)
+    vi.stubGlobal("WebSocket", function () {
+      const ws = {
+        onopen: null as (() => void) | null,
+        onerror: null as (() => void) | null,
+        close: vi.fn(),
+      };
+      setTimeout(() => ws.onopen?.(), 0);
+      return ws;
+    });
 
     vi.mocked(fs.existsSync).mockImplementation((path) => {
       return String(path).includes("Google/Chrome/DevToolsActivePort");
